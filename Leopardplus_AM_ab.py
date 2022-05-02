@@ -1,3 +1,4 @@
+from pytest import param
 from utilsADCN import evenly,listCollectS,sourceAndTargetAmazonLoader,amazonDataLoaderUniform
 from model import simpleMPL
 from LeopardBasic_ab import ADCNMPL
@@ -47,6 +48,8 @@ def run_leopard(params):
         + str(lr) + 'lrSGD')
         if params.mmd:
             paramstamp = paramstamp + '_MMD_' + params.mmd_kernel
+        if params.mmd_d:
+            paramstamp = paramstamp + '_MMD-D'
         resultfile = paramstamp+'.pkl'
         result_dir = file_path + '/' + resultfile
         if os.path.isfile(result_dir):
@@ -125,6 +128,8 @@ def run_leopard(params):
             if params.mmd:
                 ADCNnet.mmd     = True
                 ADCNnet.kernel  = params.mmd_kernel
+            if params.mmd_d:
+                ADCNnet.mmd_d = True
 
             print(ADCNnet.ADCNcnn)
             print(ADCNnet.discriminator)
@@ -218,7 +223,7 @@ def run_leopard(params):
                     if ADCNnet.driftStatus == 2:
                         # grow layer if drift is confirmed driftStatus == 2
                         ADCNnet.layerGrowing()
-                        layerCount += 1
+                        layerCount = len(ADCNnet.ADCNae) - 1
 
                         # initialization phase
                         ADCNnet.initialization(dataStreamSource, layerCount,

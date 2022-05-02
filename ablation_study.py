@@ -83,6 +83,8 @@ if __name__ == "__main__":
     parser.add_argument('--mmd', action='store_true',
                         help='replace kl divergence in Clustering-Friendly Latent Space with MMD distance')
     parser.add_argument('--mmd_kernel', type=str, default='gaussian', help="gaussian(default)|rbf|multiscale")
+    parser.add_argument('--mmd_d', action='store_true',
+                        help='replace domain discriminator method with MMD')
 
     ########################AE_kmeans#######################
     parser.add_argument('--epochs', dest='epochs', default=1,

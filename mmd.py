@@ -1,6 +1,11 @@
 import torch
 import torch.nn as nn
 
+def MatConvert(x, device, dtype):
+    """convert the numpy to a torch tensor."""
+    x = torch.from_numpy(x).to(device, dtype)
+    return x
+    
 def gaussian_kernel(a, b):
     dim1_1, dim1_2 = a.shape[0], b.shape[0]
     depth = a.shape[1]
@@ -13,57 +18,6 @@ def gaussian_kernel(a, b):
 
 def mmd_g(a, b):
     return gaussian_kernel(a, a).mean() + gaussian_kernel(b, b).mean() - 2*gaussian_kernel(a, b).mean()
-
-def guassian_kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
-    """计算Gram/核矩阵
-    source: sample_size_1 * feature_size 的数据
-    target: sample_size_2 * feature_size 的数据
-    kernel_mul: 这个概念不太清楚，感觉也是为了计算每个核的bandwith
-    kernel_num: 表示的是多核的数量
-    fix_sigma: 表示是否使用固定的标准差
-
-		return: (sample_size_1 + sample_size_2) * (sample_size_1 + sample_size_2)的
-						矩阵，表达形式:
-						[	K_ss K_st
-							K_ts K_tt ]
-    """
-    n_samples = int(source.size()[0])+int(target.size()[0])
-    total = torch.cat([source, target], dim=0) # 合并在一起
-    
-    total0 = total.unsqueeze(0).expand(int(total.size(0)), \
-                                       int(total.size(0)), \
-                                       int(total.size(1)))
-    total1 = total.unsqueeze(1).expand(int(total.size(0)), \
-                                       int(total.size(0)), \
-                                       int(total.size(1)))
-    L2_distance = ((total0-total1)**2).sum(2) # 计算高斯核中的|x-y|
-    
-    # 计算多核中每个核的bandwidth
-    if fix_sigma:
-        bandwidth = fix_sigma
-    else:
-        bandwidth = torch.sum(L2_distance.data) / (n_samples**2-n_samples)
-    bandwidth /= kernel_mul ** (kernel_num // 2)
-    bandwidth_list = [bandwidth * (kernel_mul**i) for i in range(kernel_num)]
-    
-    # 高斯核的公式，exp(-|x-y|/bandwith)
-    kernel_val = [torch.exp(-L2_distance / bandwidth_temp) for \
-                  bandwidth_temp in bandwidth_list]
-
-    return sum(kernel_val) # 将多个核合并在一起
-  
-def mmd(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
-    batch_size = int(source.size()[0])
-    kernels = guassian_kernel(source, target,
-                              kernel_mul=kernel_mul, 	
-                             	kernel_num=kernel_num, 	
-                              fix_sigma=fix_sigma)
-    XX = kernels[:batch_size, :batch_size] # Source<->Source
-    YY = kernels[batch_size:, batch_size:] # Target<->Target
-    XY = kernels[:batch_size, batch_size:] # Source<->Target
-    YX = kernels[batch_size:, :batch_size] # Target<->Source
-    loss = torch.mean(XX + YY - XY -YX)
-    return loss
 
 
 def MMD(x, y, kernel, device):
@@ -105,3 +59,127 @@ def MMD(x, y, kernel, device):
       
 
     return torch.mean(XX + YY - 2. * XY)
+
+
+def Pdist2(x, y):
+    """compute the paired distance between x and y."""
+    x_norm = (x ** 2).sum(1).view(-1, 1)
+    if y is not None:
+        y_norm = (y ** 2).sum(1).view(1, -1)
+    else:
+        y = x
+        y_norm = x_norm.view(1, -1)
+    Pdist = x_norm + y_norm - 2.0 * torch.mm(x, torch.transpose(y, 0, 1))
+    Pdist[Pdist<0]=0
+    return Pdist
+
+    
+def h1_mean_var_gram(Kx, Ky, Kxy, is_var_computed, use_1sample_U=True):
+    """compute value of MMD and std of MMD using kernel matrix."""
+    Kxxy = torch.cat((Kx,Kxy),1)
+    Kyxy = torch.cat((Kxy.transpose(0,1),Ky),1)
+    Kxyxy = torch.cat((Kxxy,Kyxy),0)
+    nx = Kx.shape[0]
+    ny = Ky.shape[0]
+    is_unbiased = True
+    if is_unbiased:
+        xx = torch.div((torch.sum(Kx) - torch.sum(torch.diag(Kx))), (nx * (nx - 1)))
+        yy = torch.div((torch.sum(Ky) - torch.sum(torch.diag(Ky))), (ny * (ny - 1)))
+        # one-sample U-statistic.
+        if use_1sample_U:
+            xy = torch.div((torch.sum(Kxy) - torch.sum(torch.diag(Kxy))), (nx * (ny - 1)))
+        else:
+            xy = torch.div(torch.sum(Kxy), (nx * ny))
+        mmd2 = xx - 2 * xy + yy
+    else:
+        xx = torch.div((torch.sum(Kx)), (nx * nx))
+        yy = torch.div((torch.sum(Ky)), (ny * ny))
+        # one-sample U-statistic.
+        if use_1sample_U:
+            xy = torch.div((torch.sum(Kxy)), (nx * ny))
+        else:
+            xy = torch.div(torch.sum(Kxy), (nx * ny))
+        mmd2 = xx - 2 * xy + yy
+    if not is_var_computed:
+        return mmd2, None
+
+    hh = Kx+Ky-Kxy-Kxy.transpose(0,1)
+    V1 = torch.dot(hh.sum(1)/ny,hh.sum(1)/ny) / ny
+    V2 = (hh).sum() / (nx) / nx
+    varEst = 4*(V1 - V2**2)
+    if  varEst == 0.0:
+        print('error!!'+str(V1))
+    return mmd2, varEst, Kxyxy
+
+
+def MMDu(Fea1, Fea2, Fea_org1, Fea_org2, sigma, sigma0=0.1, epsilon=10 ** (-10), is_smooth=True, is_var_computed=True, use_1sample_U=True):
+    """compute value of deep-kernel MMD and std of deep-kernel MMD using merged data."""
+    X = Fea1 # fetch the sample 1 (features of deep networks)
+    Y = Fea2 # fetch the sample 2 (features of deep networks)
+    X_org = Fea_org1 # fetch the original sample 1
+    Y_org = Fea_org2 # fetch the original sample 2
+    L = 1 # generalized Gaussian (if L>1)
+    Dxx = Pdist2(X, X)
+    Dyy = Pdist2(Y, Y)
+    Dxy = Pdist2(X, Y)
+    Dxx_org = Pdist2(X_org, X_org)
+    Dyy_org = Pdist2(Y_org, Y_org)
+    Dxy_org = Pdist2(X_org, Y_org)
+    if is_smooth:
+        Kx = (1.0-epsilon) * torch.exp(-(Dxx / sigma0) - (Dxx_org / sigma)) + epsilon * torch.exp(-Dxx_org / sigma)
+        Ky = (1.0-epsilon) * torch.exp(-(Dyy / sigma0) - (Dyy_org / sigma)) + epsilon * torch.exp(-Dyy_org / sigma)
+        Kxy = (1.0-epsilon) * torch.exp(-(Dxy / sigma0) - (Dxy_org / sigma)) + epsilon * torch.exp(-Dxy_org / sigma)
+    else:
+        Kx = torch.exp(-Dxx / sigma0)
+        Ky = torch.exp(-Dyy / sigma0)
+        Kxy = torch.exp(-Dxy / sigma0)
+    return h1_mean_var_gram(Kx, Ky, Kxy, is_var_computed, use_1sample_U)
+
+
+def MMDu_multi(weights, Fea1, Fea2, Fea_org1, Fea_org2, sigma, sigma0, epsilon, is_smooth=True, is_var_computed=True, use_1sample_U=True):
+    """compute value of deep-kernel MMD and std of deep-kernel MMD using merged data."""
+    num_kernels = len(Fea1)
+    X_org = Fea_org1 # fetch the original sample 1
+    Y_org = Fea_org2 # fetch the original sample 2
+    Dxx_org = Pdist2(X_org, X_org)
+    Dyy_org = Pdist2(Y_org, Y_org)
+    Dxy_org = Pdist2(X_org, Y_org)
+    for ii in range(num_kernels):
+        X = Fea1[ii]  # fetch the sample 1 (features of deep networks)
+        Y = Fea2[ii]  # fetch the sample 2 (features of deep networks)
+        Dxx = Pdist2(X, X)
+        Dyy = Pdist2(Y, Y)
+        Dxy = Pdist2(X, Y)
+
+        if is_smooth:
+            Kx = (1.0-epsilon[ii]) * torch.exp(-(Dxx / sigma0[ii]) - (Dxx_org / sigma[ii])) + epsilon[ii] * torch.exp(-Dxx_org / sigma[ii])
+            Ky = (1.0-epsilon[ii]) * torch.exp(-(Dyy / sigma0[ii]) - (Dyy_org / sigma[ii])) + epsilon[ii] * torch.exp(-Dyy_org / sigma[ii])
+            Kxy = (1.0-epsilon[ii]) * torch.exp(-(Dxy / sigma0[ii]) - (Dxy_org / sigma[ii])) + epsilon[ii] * torch.exp(-Dxy_org / sigma[ii])
+        else:
+            Kx = torch.exp(-Dxx / sigma0[ii])
+            Ky = torch.exp(-Dyy / sigma0[ii])
+            Kxy = torch.exp(-Dxy / sigma0[ii])
+
+        if ii == 0:
+            Kx_all = weights[ii] * Kx
+            Ky_all = weights[ii] * Ky
+            Kxy_all = weights[ii] * Kxy
+        else:
+            Kx_all = Kx_all + weights[ii] * Kx
+            Ky_all = Ky_all + weights[ii] * Ky
+            Kxy_all = Kxy_all + weights[ii] * Kxy
+
+    return h1_mean_var_gram(Kx_all, Ky_all, Kxy_all, is_var_computed, use_1sample_U)
+
+def MMDu_linear_kernel(Fea1, Fea2, is_var_computed=True, use_1sample_U=True):
+    """compute value of (deep) lineaer-kernel MMD and std of (deep) lineaer-kernel MMD using merged data."""
+    try:
+        X = Fea1
+        Y = Fea2
+    except:
+        X = Fea1.unsqueeze(1)
+        Y = Fea2.unsqueeze(1)
+    Kx = X.mm(X.transpose(0,1))
+    Ky = Y.mm(Y.transpose(0,1))
+    Kxy = X.mm(Y.transpose(0,1))
+    return h1_mean_var_gram(Kx, Ky, Kxy, is_var_computed, use_1sample_U)

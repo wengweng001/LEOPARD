@@ -14,7 +14,7 @@ import warnings
 from utilsADCN import clusteringLoss, maskingNoise, imageNoise, meanStdCalculator, stableSoftmax, getlistchunk
 from model import ConvAeMNIST, smallAE, cluster, ADCNoldtask, domain_classifier
 
-from mmd import mmd, MMD, mmd_g
+from mmd import mmd_g, MMD, MMDu, MatConvert, MMDu_multi
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -1638,6 +1638,7 @@ class ADCNMPL(nn.Module):
         # params
         self.clutering_loss  = True
         self.domain_loss     = True
+        self.mmd_d           = False
         self.alpha_kl        = alpha_kl
         self.alpha_dc        = alpha_dc
         self.mmd             = False
@@ -2267,7 +2268,6 @@ class ADCNMPL(nn.Module):
                         kl_loss = self.alpha_kl * kl
                     else:
                         if self.kernel == 'gaussian':
-                            mmd_loss = mmd(pl,ql)
                             mmd_loss = mmd_g(pl,ql)
                         elif self.kernel == 'multiscale':
                             mmd_loss = MMD(pl,ql,self.kernel,self.device)
@@ -2308,7 +2308,7 @@ class ADCNMPL(nn.Module):
         for idx, _ in enumerate(self.ADCNae):
             x = self.trainBasicAe(x, x_ori, idx, epoch = epoch, clustering = clustering, evolving = evolving)
 
-    def trainDC(self, x, y):
+    def trainDC(self, x, y, x1, x2):
         # encode decode in end-to-end manner
 
         # prepare network
@@ -2392,6 +2392,197 @@ class ADCNMPL(nn.Module):
             loss.backward()
 
             # perform a single optimization step (parameter update)
+            optimizer.step()
+
+        if self.mmd_d:
+            dtype = torch.float
+
+            # Initialize parameters
+            epsilonOPT = torch.log(MatConvert(np.random.rand(1) * 10 ** (-10), self.device, dtype))
+            epsilonOPT.requires_grad = True
+            sigmaOPT = MatConvert(np.ones(1) * np.sqrt(2*300), self.device, dtype)
+            sigmaOPT.requires_grad = True
+            sigma0OPT = MatConvert(np.ones(1) * np.sqrt(0.005), self.device, dtype)
+            sigma0OPT.requires_grad = True
+            
+            # for loop of data batch
+            nData = min(x1.shape[0],x2.shape[0])
+            shuffled_indices = torch.randperm(nData)
+            batchs = int(nData/self.batchSize)
+
+            # get optimizer
+            list_param = list(self.ADCNcnn.parameters())
+            for iLayer, _ in enumerate(self.ADCNae):
+                list_param = list_param + list(self.ADCNae[iLayer].network.parameters())
+            list_param = list_param + [epsilonOPT] + [sigmaOPT] + [sigma0OPT]
+            optimizer = torch.optim.SGD(list_param, lr=self.lr, momentum=0.95, weight_decay=0.00005)
+
+            for i in range(batchs):
+                # print('Data batch:',int(iData/self.batchSize))
+                indices = shuffled_indices[i*self.batchSize:((i+1) * self.batchSize)]
+                
+                minibatch_x1 = x1[indices].to(self.device)
+                minibatch_x2 = x2[indices].to(self.device)
+
+                # clear the gradients of all optimized variables
+                optimizer.zero_grad()
+
+                # forward encoder CNN
+                feat_s1 = self.ADCNcnn(minibatch_x1)
+                feat_s2 = self.ADCNcnn(minibatch_x2)
+
+                # feedforward from input layer to latent space, encode
+                for iLayer,_ in enumerate(self.ADCNae):
+                    currnet = self.ADCNae[iLayer].network
+                    obj     = currnet.train()
+                    obj     = obj.to(self.device)
+                    feat_s1  = obj(feat_s1)
+                    feat_s2  = obj(feat_s2)
+
+                # Compute epsilon, sigma and sigma_0
+                ep = torch.exp(epsilonOPT) / (1 + torch.exp(epsilonOPT))
+                sigma = sigmaOPT ** 2
+                sigma0_u = sigma0OPT ** 2
+
+                # mmd loss
+                TEMP = MMDu(feat_s1, feat_s2, minibatch_x1, minibatch_x2, sigma, sigma0_u, ep)
+                mmd_value_temp = -1 * (TEMP[0])
+                mmd_std_temp = torch.sqrt(TEMP[1] + 10 ** (-8))
+                STAT_u = torch.div(mmd_value_temp, mmd_std_temp) * self.alpha_dc
+                print('mmd:',STAT_u)
+                # Compute gradient
+                STAT_u.backward()
+                # Update weights using gradient descent
+                optimizer.step()
+
+        return x
+
+    def trainMMD(self, x1, x2, x):
+        # encode decode in end-to-end manner
+
+        # prepare network
+        self.ADCNcnn = self.ADCNcnn.train()
+        self.ADCNcnn = self.ADCNcnn.to(self.device)
+
+        # prepare data
+        nData = x.shape[0]
+        x = x.to(self.device)
+
+        # get optimizer
+        optimizer = torch.optim.SGD(self.ADCNcnn.parameters(), lr=self.lr, momentum=0.95, weight_decay=0.00005)
+        for iLayer, _ in enumerate(self.ADCNae):
+            optimizer.add_param_group({'params': self.ADCNae[iLayer].network.parameters()})
+
+        # for loop of data batch
+        shuffled_indices = torch.randperm(nData)
+        batchs = int(nData/self.batchSize)
+
+        for i in range(batchs):
+
+            # print('Data batch:',int(iData/self.batchSize))
+            indices = shuffled_indices[i*self.batchSize:((i+1) * self.batchSize)]
+            
+            minibatch_xTrain = x[indices]
+
+            # clear the gradients of all optimized variables
+            optimizer.zero_grad()
+
+            # forward encoder CNN
+            feat_s = self.ADCNcnn(minibatch_xTrain)
+            feat_s1 = feat_s
+
+            # feedforward from input layer to latent space, encode
+            for iLayer,_ in enumerate(self.ADCNae):
+                currnet = self.ADCNae[iLayer].network
+                obj     = currnet.train()
+                obj     = obj.to(self.device)
+                feat_s  = obj(feat_s)
+
+            # feedforward from latent space to output layer, decode
+            for iLayer in range(len(self.ADCNae)-1,0-1,-1):
+                currnet = self.ADCNae[iLayer].network
+                obj     = currnet.train()
+                obj     = obj.to(self.device)
+                feat_s  = obj(feat_s, 2)
+                recons_feat_s = feat_s
+
+            # # forward decoder CNN
+            recons_x = self.ADCNcnn(feat_s, 2)
+
+            # recons loss cnn
+            loss1 = self.criterion(recons_x, minibatch_xTrain) # clustering loss L1 in equ(14)
+            # loss = loss1
+
+            #recons loss AE
+            loss2 = self.criterion(recons_feat_s, feat_s1)
+            
+            # mmd loss
+            loss = loss1 + loss2
+
+            # backward pass: compute gradient of the loss with respect to model parameters
+            loss.backward()
+
+            # perform a single optimization step (parameter update)
+            optimizer.step()
+
+        dtype = torch.float
+
+        # Initialize parameters
+        epsilonOPT = torch.log(MatConvert(np.random.rand(1) * 10 ** (-10), self.device, dtype))
+        epsilonOPT.requires_grad = True
+        sigmaOPT = MatConvert(np.ones(1) * np.sqrt(2*300), self.device, dtype)
+        sigmaOPT.requires_grad = True
+        sigma0OPT = MatConvert(np.ones(1) * np.sqrt(0.005), self.device, dtype)
+        sigma0OPT.requires_grad = True
+        
+        # for loop of data batch
+        nData = min(x1.shape[0],x2.shape[0])
+        shuffled_indices = torch.randperm(nData)
+        batchs = int(nData/self.batchSize)
+
+        # get optimizer
+        list_param = list(self.ADCNcnn.parameters())
+        for iLayer, _ in enumerate(self.ADCNae):
+            list_param = list_param + list(self.ADCNae[iLayer].network.parameters())
+        list_param = list_param + [epsilonOPT] + [sigmaOPT] + [sigma0OPT]
+        optimizer = torch.optim.SGD(list_param, lr=self.lr, momentum=0.95, weight_decay=0.00005)
+
+        for i in range(batchs):
+            # print('Data batch:',int(iData/self.batchSize))
+            indices = shuffled_indices[i*self.batchSize:((i+1) * self.batchSize)]
+            
+            minibatch_x1 = x1[indices].to(self.device)
+            minibatch_x2 = x2[indices].to(self.device)
+
+            # clear the gradients of all optimized variables
+            optimizer.zero_grad()
+
+            # forward encoder CNN
+            feat_s1 = self.ADCNcnn(minibatch_x1)
+            feat_s2 = self.ADCNcnn(minibatch_x2)
+
+            # feedforward from input layer to latent space, encode
+            for iLayer,_ in enumerate(self.ADCNae):
+                currnet = self.ADCNae[iLayer].network
+                obj     = currnet.train()
+                obj     = obj.to(self.device)
+                feat_s1  = obj(feat_s1)
+                feat_s2  = obj(feat_s2)
+
+            # Compute epsilon, sigma and sigma_0
+            ep = torch.exp(epsilonOPT) / (1 + torch.exp(epsilonOPT))
+            sigma = sigmaOPT ** 2
+            sigma0_u = sigma0OPT ** 2
+
+            # mmd loss
+            TEMP = MMDu(feat_s1, feat_s2, minibatch_x1, minibatch_x2, sigma, sigma0_u, ep)
+            mmd_value_temp = -1 * (TEMP[0])
+            mmd_std_temp = torch.sqrt(TEMP[1] + 10 ** (-8))
+            STAT_u = torch.div(mmd_value_temp, mmd_std_temp)
+            print('mmd:',STAT_u)
+            # Compute gradient
+            STAT_u.backward()
+            # Update weights using gradient descent
             optimizer.step()
 
         return x
@@ -2489,7 +2680,13 @@ class ADCNMPL(nn.Module):
     
         for iEpoch in range(0, nEpochKLL1):
             # print('=======Epoch==========TrainDomain:', iEpoch+1)
-            self.trainDC(x, domain_label)
+            self.trainDC(x, domain_label, batchDataS, batchDataT)
+
+            # if not self.mmd_d:
+            #     self.trainDC(x, domain_label)
+            # else:
+            #     self.trainMMD(batchDataS, batchDataT, x)
+
             # self.trainDC_one(x, domain_label)
 
 
