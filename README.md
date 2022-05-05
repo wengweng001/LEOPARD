@@ -5,8 +5,8 @@ This is a PyTorch implementation of the transfer learning experiments described 
 ## Requirements
 The current version of the code has been tested with the following configuration:
 - python 3.6
-- pytorch 1.7.0
-- torchvision 0.8.0
+- pytorch 1.9.0
+- torchvision 0.10.0
 
 ## Run
 ### Individual experment can be run with `main.py`
