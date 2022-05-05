@@ -1,4 +1,5 @@
 data/*
+Results/*
 .vscode
 .idea
 *.log

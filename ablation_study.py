@@ -83,6 +83,15 @@ if __name__ == "__main__":
     parser.add_argument('--mmd', action='store_true',
                         help='replace kl divergence in Clustering-Friendly Latent Space with MMD distance')
     parser.add_argument('--mmd_kernel', type=str, default='gaussian', help="gaussian(default)|rbf|multiscale")
+    parser.add_argument('--mmd_d', action='store_true',
+                        help='replace domain discriminator method with MMD-D')
+    parser.add_argument('--mmd_o', action='store_true',
+                        help='replace domain discriminator method with MMD-O')
+    parser.add_argument('--pseudo_label', action='store_true',
+                        help='generate pseudo label for target stream')
+    parser.add_argument('--pseudo_n', default=0.1,
+                        type=float,
+                        help='The percentage of pseudo label generated for target stream. (default: %(default)s)')
 
     ########################AE_kmeans#######################
     parser.add_argument('--epochs', dest='epochs', default=1,

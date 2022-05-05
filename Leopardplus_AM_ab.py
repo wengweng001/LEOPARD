@@ -1,3 +1,4 @@
+from pytest import param
 from utilsADCN import evenly,listCollectS,sourceAndTargetAmazonLoader,amazonDataLoaderUniform
 from model import simpleMPL
 from LeopardBasic_ab import ADCNMPL
@@ -11,7 +12,7 @@ import os
 
 def run_leopard(params):
     # create folder to save performance file
-    file_path = 'outputs/AM/leopard+'
+    file_path = 'ablation_outputs/AM/leopard+'
     if not os.path.exists(file_path):
         os.makedirs(file_path)
 
@@ -47,6 +48,26 @@ def run_leopard(params):
         + str(lr) + 'lrSGD')
         if params.mmd:
             paramstamp = paramstamp + '_MMD_' + params.mmd_kernel
+        if params.mmd_d:
+            paramstamp = paramstamp + '_MMD-D'
+            domain_loss = True
+            if not domain_loss:
+                paramstamp = ('Leopard++_' + TypeRun+str(nRoundTest)+'Times_'+str(portion)+'Portion_'
+                            + str(noOfEpochInitializationCluster) + 'initEpochs_'
+                            +str(noOfEpochPrequential)+'ClusEpochs_'+str(nEpochKLL1)+'DCEpochs_'+str(alpha1)+
+                            'alphakl_'+str(alpha2)+'alphammd_' + str(batch) + 'Batchsize_'
+                            + str(lr) + 'lrSGD_MMD-D')
+        if params.mmd_o:
+            paramstamp = paramstamp + '_MMD-O'
+            domain_loss = True
+            if not domain_loss:
+                paramstamp = ('Leopard++_' + TypeRun+str(nRoundTest)+'Times_'+str(portion)+'Portion_'
+                            + str(noOfEpochInitializationCluster) + 'initEpochs_'
+                            +str(noOfEpochPrequential)+'ClusEpochs_'+str(nEpochKLL1)+'DCEpochs_'+str(alpha1)+
+                            'alphakl_'+str(alpha2)+'alphammd_' + str(batch) + 'Batchsize_'
+                            + str(lr) + 'lrSGD_MMD-O')
+        if params.pseudo_label:
+            paramstamp = paramstamp + '_{}%pseudo_label'.format(params.pseudo_n*100)
         resultfile = paramstamp+'.pkl'
         result_dir = file_path + '/' + resultfile
         if os.path.isfile(result_dir):
@@ -125,6 +146,14 @@ def run_leopard(params):
             if params.mmd:
                 ADCNnet.mmd     = True
                 ADCNnet.kernel  = params.mmd_kernel
+            if params.mmd_d:
+                ADCNnet.mmd_d = True
+                if not domain_loss:
+                    ADCNnet.domain_loss = False # select if needed when using deep kernel mmd
+            if params.mmd_o:
+                ADCNnet.mmd_o = True
+                if not domain_loss:
+                    ADCNnet.domain_loss = False # select if needed when using deep kernel mmd
 
             print(ADCNnet.ADCNcnn)
             print(ADCNnet.discriminator)
@@ -218,7 +247,7 @@ def run_leopard(params):
                     if ADCNnet.driftStatus == 2:
                         # grow layer if drift is confirmed driftStatus == 2
                         ADCNnet.layerGrowing()
-                        layerCount += 1
+                        layerCount = len(ADCNnet.ADCNae) - 1
 
                         # initialization phase
                         ADCNnet.initialization(dataStreamSource, layerCount,
@@ -237,6 +266,16 @@ def run_leopard(params):
 
                     # update allegiance
                     ADCNnet.updateAllegiance(allegianceData, allegianceLabel)
+
+                    if params.pseudo_label:
+                        ADCNnet.predict(batchDataT)
+
+                        index = torch.topk(torch.from_numpy(ADCNnet.score).max(dim=1)[0], int(batchDataT.shape[0]*params.pseudo_n))[1]
+                        target_y = torch.from_numpy(ADCNnet.predictedLabel[index])
+                        target_x = batchDataT[index]
+                        
+                        ADCNnet.updateAllegiance(target_x, target_y)
+                        del target_x, target_y, index, ADCNnet.predictedLabel, ADCNnet.score
 
                 end_train = time.time()
                 training_time = end_train - start_train
