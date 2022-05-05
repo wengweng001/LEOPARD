@@ -42,6 +42,6 @@ To run specific methods, take **Amazon Review** as an example, you can use the f
 - MNIST to USPS: `run_mnist2usps.sh`
 - USPS to MNIST: `run_usps2mnist.sh`
 - Office-31: `run_office.sh`
-- partial ablation study result: `run_ablation.sh`
+- partial ablation study result: `run_ablation.sh` \
 Experiments result in the paper can be viewed under `csv` folder.
 
