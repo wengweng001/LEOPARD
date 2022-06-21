@@ -1,5 +1,3 @@
-# The code in this file was originally developed by Andri Ashfahani with any major modification
-
 import numpy as np
 import pandas as pd
 import time
